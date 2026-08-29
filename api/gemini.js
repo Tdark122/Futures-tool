@@ -22,7 +22,7 @@ module.exports = async function handler(req, res) {
     return res.status(400).json({ error: 'Request body must include a "prompt" string.' });
   }
 
-  const MODEL = 'gemini-2.0-flash';
+  const MODEL = 'gemini-3.6-flash';
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent?key=${apiKey}`;
 
   try {
