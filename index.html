@@ -316,41 +316,28 @@ function normalizeSymbol(raw){
   return s;
 }
 
-// MEXC Futures (contract) public endpoints — no API key required
-async function fetchMexcTicker(symbol){
-  const res = await fetch(`https://contract.mexc.com/api/v1/contract/ticker?symbol=${symbol}`);
-  if(!res.ok) throw new Error(`ticker ${res.status}`);
+// MEXC data is fetched server-side via /api/mexc (avoids browser CORS blocks)
+async function fetchMexcData(symbol){
+  const res = await fetch(`/api/mexc?symbol=${encodeURIComponent(symbol)}`);
   const json = await res.json();
-  if(!json.success || !json.data) throw new Error('no ticker data');
-  return json.data;
-}
-
-async function fetchMexcKlines(symbol){
-  const res = await fetch(`https://contract.mexc.com/api/v1/contract/kline/${symbol}?interval=Min15`);
-  if(!res.ok) throw new Error(`klines ${res.status}`);
-  const json = await res.json();
-  if(!json.success || !json.data || !json.data.close) throw new Error('no kline data');
-  const closes = json.data.close.slice(-24); // ~last 6 hours on 15m candles
-  return closes;
+  if(!res.ok || !json.ok) throw new Error(json.error || `mexc proxy ${res.status}`);
+  return json;
 }
 
 async function fetchMarketData(symbols){
   const results = {};
   await Promise.all(symbols.map(async (symbol) => {
     try{
-      const [ticker, closes] = await Promise.all([
-        fetchMexcTicker(symbol),
-        fetchMexcKlines(symbol).catch(() => [])
-      ]);
+      const d = await fetchMexcData(symbol);
       results[symbol] = {
         ok: true,
-        lastPrice: ticker.lastPrice,
-        change24h: ticker.riseFallRate != null ? (ticker.riseFallRate * 100).toFixed(2) : null,
-        high24: ticker.high24Price,
-        low24: ticker.low24Price,
-        fundingRate: ticker.fundingRate,
-        volume24: ticker.volume24,
-        recentCloses: closes
+        lastPrice: d.lastPrice,
+        change24h: d.change24h,
+        high24: d.high24,
+        low24: d.low24,
+        fundingRate: d.fundingRate,
+        volume24: d.volume24,
+        recentCloses: d.recentCloses || []
       };
     }catch(err){
       results[symbol] = { ok: false, error: err.message };
@@ -465,7 +452,7 @@ function renderSignals(signals, marketData){
           <span class="tag">MEXC live</span>
         </div>`;
     } else {
-      liveRow = `<div class="live-price"><span class="chg down">no live data</span></div>`;
+      liveRow = `<div class="live-price"><span class="chg down">${escapeHtml(md?.error || 'no live data')}</span></div>`;
     }
     card.innerHTML = `
       <div class="card-top">
