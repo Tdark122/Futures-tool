@@ -190,6 +190,24 @@
   .lvl .v{font-size:13px;font-weight:600;margin-top:3px;}
   .reasoning{font-size:12px;color:var(--text-dim);line-height:1.55;}
 
+  .indicators{
+    background:var(--bg-raised);
+    border:1px solid var(--line);
+    border-radius:4px;
+    padding:10px 10px 8px;
+    margin-bottom:12px;
+  }
+  .ind-title{
+    font-size:9.5px;color:var(--amber);text-transform:uppercase;letter-spacing:1px;
+    margin-bottom:7px;display:flex;justify-content:space-between;align-items:center;
+  }
+  .ind-src{color:var(--text-dim);font-weight:400;text-transform:none;letter-spacing:0;font-size:9px;}
+  .ind-grid{display:grid;grid-template-columns:1fr 1fr;gap:6px 10px;}
+  .ind-item{display:flex;justify-content:space-between;font-size:11px;}
+  .ind-item .ik{color:var(--text-dim);}
+  .ind-item .iv{color:var(--text);font-weight:600;}
+  .ind-note{font-size:11px;color:var(--text-dim);line-height:1.4;}
+
   .empty-state{
     text-align:center;color:var(--text-dim);font-size:13px;
     padding:50px 20px;border:1px dashed var(--line);border-radius:6px;
@@ -204,7 +222,7 @@
 <header>
   <div class="brand">
     <h1>SIGNAL DESK</h1>
-    <span class="tick">// mexc live data · gemini reasoning</span>
+    <span class="tick">// kraken live data · gemini reasoning</span>
   </div>
   <div class="pulse-wrap">
     <span class="pulse-dot" id="pulseDot"></span>
@@ -215,7 +233,7 @@
 <main>
 
   <div class="disclaimer">
-    <strong>Not financial advice.</strong> Live prices and candles are pulled directly from MEXC's public futures API — that part is real. The signal, confidence score, and levels on top of that are Gemini's interpretation, and it can still be wrong. Verify independently before acting. You are trading at your own risk.
+    <strong>Not financial advice.</strong> Live prices are pulled directly from Kraken Futures' public API — that part is real. The signal, confidence score, and levels on top of that are Gemini's interpretation, and it can still be wrong. Verify independently before acting. You are trading at your own risk.
   </div>
 
   <div class="panel">
@@ -235,7 +253,7 @@
     </div>
     <div class="panel-row" style="margin-top:14px;">
       <div class="field">
-        <label for="context">Optional notes (news, sentiment — adds to the live MEXC data below)</label>
+        <label for="context">Optional notes (news, sentiment — adds to the live Kraken data below)</label>
         <textarea id="context" placeholder="e.g. FOMC minutes drop today, BTC ETF outflows this week..."></textarea>
       </div>
     </div>
@@ -316,11 +334,11 @@ function normalizeSymbol(raw){
   return s;
 }
 
-// MEXC data is fetched server-side via /api/mexc (avoids browser CORS blocks)
+// Live data is fetched server-side via /api/mexc (avoids browser CORS blocks)
 async function fetchMexcData(symbol){
   const res = await fetch(`/api/mexc?symbol=${encodeURIComponent(symbol)}`);
   const json = await res.json();
-  if(!res.ok || !json.ok) throw new Error(json.error || `mexc proxy ${res.status}`);
+  if(!res.ok || !json.ok) throw new Error(json.error || `data proxy ${res.status}`);
   return json;
 }
 
@@ -337,7 +355,10 @@ async function fetchMarketData(symbols){
         low24: d.low24,
         fundingRate: d.fundingRate,
         volume24: d.volume24,
-        recentCloses: d.recentCloses || []
+        recentCloses: d.recentCloses || [],
+        indicators: d.indicators || null,
+        indicatorsAvailable: !!d.indicatorsAvailable,
+        indicatorsNote: d.indicatorsNote || null
       };
     }catch(err){
       results[symbol] = { ok: false, error: err.message };
@@ -346,18 +367,32 @@ async function fetchMarketData(symbols){
   return results;
 }
 
+function formatIndicatorsForPrompt(ind){
+  if(!ind) return 'none (insufficient candle history)';
+  const parts = [
+    `SMA20=${ind.sma20}`,
+    `EMA12=${ind.ema12}`,
+    `RSI14=${ind.rsi14}`,
+    ind.macd ? `MACD(line=${ind.macd.macd},signal=${ind.macd.signal},hist=${ind.macd.histogram})` : 'MACD=n/a',
+    ind.bollinger ? `Bollinger(upper=${ind.bollinger.upper},mid=${ind.bollinger.middle},lower=${ind.bollinger.lower})` : 'Bollinger=n/a',
+    ind.stochastic ? `Stochastic(%K=${ind.stochastic.k},%D=${ind.stochastic.d})` : 'Stochastic=n/a',
+    `ATR14=${ind.atr14}`
+  ];
+  return parts.join(', ');
+}
+
 function buildPrompt(symbols, risk, context, marketData){
   const dataBlock = symbols.map(symbol => {
     const d = marketData[symbol];
     if(!d || !d.ok){
       return `${symbol}: LIVE DATA UNAVAILABLE (${d?.error || 'fetch failed'}) — treat with low confidence only.`;
     }
-    return `${symbol}: lastPrice=${d.lastPrice}, 24hChange=${d.change24h}%, 24hHigh=${d.high24}, 24hLow=${d.low24}, fundingRate=${d.fundingRate}, recent15mCloses=[${d.recentCloses.join(', ')}]`;
+    return `${symbol}: lastPrice=${d.lastPrice}, 24hChange=${d.change24h}%, 24hHigh=${d.high24}, 24hLow=${d.low24}, fundingRate=${d.fundingRate}, indicators: ${formatIndicatorsForPrompt(d.indicators)}`;
   }).join('\n');
 
-  return `You are an experienced crypto futures market analyst assisting a solo trader on MEXC.
+  return `You are an experienced crypto futures market analyst assisting a solo trader.
 
-LIVE MARKET DATA (pulled just now from MEXC's public futures API — treat as current and accurate):
+LIVE MARKET DATA AND REAL COMPUTED INDICATORS (pulled just now from Kraken Futures' public API — treat as current and accurate; the indicator values are already calculated for you from real candles, do not recompute or second-guess them):
 ${dataBlock}
 
 Trader's risk profile: ${risk}.
@@ -389,7 +424,7 @@ async function scan(){
   setBusy(true);
 
   try{
-    setStatus(`Pulling live data from MEXC for ${symbols.join(', ')}…`);
+    setStatus(`Pulling live data for ${symbols.join(', ')}…`);
     const marketData = await fetchMarketData(symbols);
 
     setStatus('Asking Gemini to read the data…');
@@ -449,57 +484,32 @@ function renderSignals(signals, marketData){
         <div class="live-price">
           <span class="px">$${escapeHtml(md.lastPrice)}</span>
           <span class="chg ${chgClass}">${chgSign}${escapeHtml(md.change24h)}% 24h</span>
-          <span class="tag">MEXC live</span>
+          <span class="tag">Kraken live</span>
         </div>`;
     } else {
       liveRow = `<div class="live-price"><span class="chg down">${escapeHtml(md?.error || 'no live data')}</span></div>`;
+    }
+    let indicatorsRow = '';
+    if(md && md.ok && md.indicatorsAvailable && md.indicators){
+      const ind = md.indicators;
+      indicatorsRow = `
+        <div class="indicators">
+          <div class="ind-title">LIVE INDICATORS <span class="ind-src">from Kraken candles</span></div>
+          <div class="ind-grid">
+            <div class="ind-item"><span class="ik">SMA20</span><span class="iv">${escapeHtml(ind.sma20 ?? '—')}</span></div>
+            <div class="ind-item"><span class="ik">EMA12</span><span class="iv">${escapeHtml(ind.ema12 ?? '—')}</span></div>
+            <div class="ind-item"><span class="ik">RSI14</span><span class="iv">${escapeHtml(ind.rsi14 ?? '—')}</span></div>
+            <div class="ind-item"><span class="ik">ATR14</span><span class="iv">${escapeHtml(ind.atr14 ?? '—')}</span></div>
+            <div class="ind-item"><span class="ik">MACD</span><span class="iv">${ind.macd ? escapeHtml(`${ind.macd.macd} / ${ind.macd.signal}`) : '—'}</span></div>
+            <div class="ind-item"><span class="ik">Stoch %K/%D</span><span class="iv">${ind.stochastic ? escapeHtml(`${ind.stochastic.k} / ${ind.stochastic.d}`) : '—'}</span></div>
+            <div class="ind-item" style="grid-column:1 / -1;"><span class="ik">Bollinger</span><span class="iv">${ind.bollinger ? escapeHtml(`${ind.bollinger.lower} — ${ind.bollinger.middle} — ${ind.bollinger.upper}`) : '—'}</span></div>
+          </div>
+        </div>`;
+    } else if(md && md.ok && md.indicatorsNote){
+      indicatorsRow = `<div class="indicators"><div class="ind-title">INDICATORS UNAVAILABLE</div><div class="ind-note">${escapeHtml(md.indicatorsNote)}</div></div>`;
     }
     card.innerHTML = `
       <div class="card-top">
         <div class="symbol">${escapeHtml(sig.symbol || '—')}</div>
         <div class="badge ${type}">${type}</div>
-      </div>
-      ${liveRow}
-      <div class="confidence-bar"><div class="confidence-fill" style="width:${conf}%"></div></div>
-      <div class="conf-label">CONFIDENCE ${conf}%</div>
-      <div class="levels">
-        <div class="lvl"><div class="k">Entry</div><div class="v">${escapeHtml(sig.entry || '—')}</div></div>
-        <div class="lvl"><div class="k">Stop</div><div class="v">${escapeHtml(sig.stopLoss || '—')}</div></div>
-        <div class="lvl"><div class="k">Target</div><div class="v">${escapeHtml(sig.takeProfit || '—')}</div></div>
-      </div>
-      <div class="reasoning">${escapeHtml(sig.reasoning || '')}</div>
-    `;
-    els.grid.appendChild(card);
-  });
-}
-
-function escapeHtml(str){
-  return String(str).replace(/[&<>"']/g, c => ({
-    '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
-  }[c]));
-}
-
-function setupAutoScan(){
-  if(autoTimer) clearInterval(autoTimer);
-  const mins = Number(els.autoInterval.value);
-  saveSettings();
-  if(mins > 0){
-    autoTimer = setInterval(scan, mins * 60 * 1000);
-  }
-}
-
-els.scanBtn.addEventListener('click', scan);
-els.clearBtn.addEventListener('click', () => {
-  els.grid.innerHTML = '';
-  els.grid.appendChild(els.emptyState);
-  setStatus('Results cleared.');
-});
-els.autoInterval.addEventListener('change', setupAutoScan);
-els.symbols.addEventListener('change', saveSettings);
-els.risk.addEventListener('change', saveSettings);
-
-setupAutoScan();
-</script>
-
-</body>
-</html>
+      </
