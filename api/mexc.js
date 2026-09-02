@@ -1,9 +1,11 @@
 // /api/mexc.js
 // Serverless function (runs on Vercel, not in the browser).
-// Fetches Binance Futures' public ticker + kline data server-side.
+// Fetches Kraken Futures' public ticker data server-side.
 // (Route/filename kept as "mexc" so index.html doesn't need any changes —
-// this now actually queries Binance under the hood.)
-// No API key required — Binance's market data endpoints are public.
+// this now actually queries Kraken Futures under the hood.)
+// Kraken is US-licensed, so unlike Binance/Bybit/OKX it does not geo-block
+// requests coming from US-based cloud server IPs (like Vercel's).
+// No API key required — Kraken's market data endpoints are public.
 
 module.exports = async function handler(req, res) {
   if (req.method !== 'GET') {
@@ -16,58 +18,48 @@ module.exports = async function handler(req, res) {
     return res.status(400).json({ error: 'Missing "symbol" query parameter, e.g. ?symbol=BTC_USDT' });
   }
 
-  // Our app uses BTC_USDT style symbols; Binance wants BTCUSDT (no underscore).
-  const binanceSymbol = rawSymbol.replace('_', '').toUpperCase();
+  // Our app uses BTC_USDT style symbols. Kraken Futures perpetuals use
+  // PF_{BASE}USD, and Kraken calls Bitcoin "XBT" instead of "BTC".
+  const BASE_ALIASES = { BTC: 'XBT' };
+  let [base] = rawSymbol.toUpperCase().split('_');
+  base = BASE_ALIASES[base] || base;
+  const krakenSymbol = `PF_${base}USD`;
 
   try {
-    const [tickerRes, fundingRes, klineRes] = await Promise.all([
-      fetch(`https://fapi.binance.com/fapi/v1/ticker/24hr?symbol=${binanceSymbol}`),
-      fetch(`https://fapi.binance.com/fapi/v1/premiumIndex?symbol=${binanceSymbol}`),
-      fetch(`https://fapi.binance.com/fapi/v1/klines?symbol=${binanceSymbol}&interval=15m&limit=24`)
-    ]);
+    const tickerRes = await fetch(`https://futures.kraken.com/derivatives/api/v3/tickers/${krakenSymbol}`);
 
     if (!tickerRes.ok) {
       const detail = await tickerRes.text();
       return res.status(502).json({
         ok: false,
-        error: `Binance ticker unavailable for ${rawSymbol}`,
+        error: `Kraken ${tickerRes.status}: ${detail.slice(0, 150)}`,
         detail: detail.slice(0, 300)
       });
     }
-    const ticker = await tickerRes.json();
 
-    let fundingRate = null;
-    try {
-      if (fundingRes.ok) {
-        const f = await fundingRes.json();
-        fundingRate = f.lastFundingRate ?? null;
-      }
-    } catch (e) {
-      // funding rate is a nice-to-have; proceed without it if this fails
-    }
+    const json = await tickerRes.json();
+    const t = json.ticker || json; // single-symbol endpoint nests under "ticker"
 
-    let recentCloses = [];
-    try {
-      if (klineRes.ok) {
-        const klines = await klineRes.json();
-        recentCloses = klines.map(k => k[4]); // index 4 = close price
-      }
-    } catch (e) {
-      // klines are a nice-to-have; proceed without them if this fails
+    if (!t || !t.last) {
+      return res.status(502).json({
+        ok: false,
+        error: `No Kraken data found for ${krakenSymbol} (from ${rawSymbol})`
+      });
     }
 
     return res.status(200).json({
       ok: true,
       symbol: rawSymbol,
-      lastPrice: ticker.lastPrice,
-      change24h: ticker.priceChangePercent,
-      high24: ticker.highPrice,
-      low24: ticker.lowPrice,
-      fundingRate,
-      volume24: ticker.volume,
-      recentCloses
+      lastPrice: t.last,
+      change24h: t.change24h != null ? Number(t.change24h).toFixed(2) : null,
+      high24: t.high24h ?? t.open24h ?? null,
+      low24: t.low24h ?? null,
+      fundingRate: t.fundingRate,
+      volume24: t.vol24h,
+      recentCloses: [] // Kraken candle data not wired in yet; live price/stats above are real
     });
   } catch (err) {
-    return res.status(500).json({ ok: false, error: err.message || 'Fetch to Binance failed.' });
+    return res.status(500).json({ ok: false, error: err.message || 'Fetch to Kraken failed.' });
   }
 };
+  
